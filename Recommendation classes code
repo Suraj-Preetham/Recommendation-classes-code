@@ -1,0 +1,113 @@
+drop table sandbox_analytics.top_free_classes_attr_new;
+create table sandbox_analytics.top_free_classes_attr_new as 
+
+with cte_class
+as
+(
+select pp.uid as class_uid, 
+       tt3.id as goal_id, 
+       tt3."name" as goal_name,
+       pp.title as class_title,
+       au.first_name || ' ' || au.last_name as educator_name, 
+       ul.started_at
+ -- listagg(distinct (case when tt."level" = 15 then tt."name" end),', ') within group (order by tt."name") as topic
+ -- listagg(distinct (case when tt2."level" = 30 then tt2."name" end),', ') within group (order by tt2."name") as topic_group 
+from posts_post pp 
+left join uplus_liveclass ul on pp.live_class_id = ul.id
+left join uplus_programme up on ul.programme_id = up.id 
+left join uplus_topicprogrammerelation tr on up.id = tr.programme_id 
+left join topology_topology tt on tr.topic_id = tt.id and tt.level = 15 
+-- left join topology_topology tt2 on tt.parent_id = tt2.id 
+left join topology_topology tt3 on up.topology_id = tt3.id 
+left join auth_user au on pp.user_id = au.id 
+where -- ul.started_at >= current_date - interval '1 month' and
+    up.is_special = 1 
+    and pp.is_active = 1      
+group by 1,2,3,4,5,6
+)
+
+,cte_watchtime as 
+( 
+select pva.video_id, 
+       count(distinct user_id) as lesson_views, 
+       count(distinct case when pva.total_watch_time >= 300 then user_id else null end) as successful_views, 
+       count(distinct case when pva.updated_at::date >= current_date - interval '1 month' then user_id else null end) as lt_30_lv, 
+       count(distinct case when pva.updated_at::date >= current_date - interval '1 month' and pva.total_watch_time >= 300 
+       then user_id else null end) as lt_30_sv,
+       count(distinct case when pva.updated_at::date >= current_date - interval '3 month' then user_id else null end) as lt_90_lv, 
+       count(distinct case when pva.updated_at::date >= current_date - interval '3 month' and pva.total_watch_time >= 300 
+       then user_id else null end) as lt_90_sv,
+       count(distinct case when pva.updated_at::date >= current_date - interval '12 month' then user_id else null end) as lt_365_lv, 
+       count(distinct case when pva.updated_at::date >= current_date - interval '12 month' and pva.total_watch_time >= 300 
+       then user_id else null end) as lt_365_sv,
+       count(distinct case when pva.updated_at::date >= current_date - interval '24 month' then user_id else null end) as lt_2y_lv, 
+       count(distinct case when pva.updated_at::date >= current_date - interval '24 month' and pva.total_watch_time >= 300 
+       then user_id else null end) as lt_2y_sv,
+       count(distinct case when pva.is_live = 1  then user_id else null end) as live_lesson_views, 
+       count(distinct case when pva.is_live = 1 and pva.total_watch_time >= 300 then user_id else null end) as live_successful_views, 
+       sum(pva.total_watch_time)*1.00/60 as total_watchmins, 
+       sum(case when pva.total_watch_time >= 300 then pva.total_watch_time else null end)*1.00/60 as successful_watchmins,
+       count(case when pva.total_watch_time >= 300 then user_id else null end)*1.00/count(distinct player_id) as sv_lv_ratio
+from production_video_analytics pva 
+where pva.updated_at::date >= current_date - interval '24 month'
+group by 1
+), 
+
+feedback as (
+select object_id, 
+       count(ff2.f_description) as total_feedbacks, 
+       concat(round((count(case when ff2.f_description = 'Yes' then 1 else null end)*1.00/count(ff2.f_description)*1.00)*100.00,2),'%') as positive, 
+       concat(round((count(case when ff2.f_description = 'No' then 1 else null end)*1.00/count(ff2.f_description)*1.00)*100.00,2),'%') as negative
+from feedback_feedbacklog ff 
+left join 
+(select *, 
+case when description in ('I somewhat understood','I understood everything','It was great','Loved it!') then 'Yes'
+     when description in ('I didn\'t understand at all','Not so great','Why are you leaving early','Not good') then 'No'
+     else description end as f_description
+from feedback_feedbackchoice) ff2 on ff.choice_id = ff2.id 
+left join feedback_feedback ff3 on ff.feedback_id = ff3.id 
+where ff.created_at::date >= current_date - interval '24 month'
+and ff3.description like '%class%' 
+and ff.feedback_id in (18,19,20,21,64,73,74) 
+group by 1 
+)
+
+select goal_id, 
+       goal_name,  
+       -- topic_group, 
+       -- topic, 
+       class_uid,  
+       class_title,
+       educator_name, 
+       started_at, 
+       successful_views, 
+       lesson_views, 
+       sv_lv_ratio, 
+       lt_30_lv, 
+       lt_30_sv, 
+       lt_90_lv, 
+       lt_90_sv, 
+       lt_365_lv, 
+       lt_365_sv, 
+       lt_2y_lv,
+       lt_2y_sv,
+       nullif(lt_30_sv*1.00/nullif(lt_30_lv,0),0) as sv_lv_ratio_30, 
+       nullif(lt_90_sv*1.00/nullif(lt_90_lv,0),0) as sv_lv_ratio_90, 
+       nullif(lt_365_sv*1.00/nullif(lt_365_lv,0),0) as sv_lv_ratio_365, 
+       nullif(lt_2y_sv*1.00/nullif(lt_2y_lv,0),0) as sv_lv_ratio_2y, 
+       live_lesson_views,
+       live_successful_views, 
+       nullif(live_successful_views*1.00/nullif(live_lesson_views,0),0) as live_sv_lv_ratio, 
+       successful_watchmins, 
+       total_watchmins, 
+       total_feedbacks, 
+       positive, 
+       negative, 
+       row_number() over(partition by goal_name order by sv_lv_ratio desc) as rk,
+       row_number() over(partition by goal_name order by successful_views desc) as rk_1, 
+       row_number() over(partition by goal_name order by lt_90_sv desc) as rk_2 
+from cte_class a 
+left join cte_watchtime b on a.class_uid = b.video_id 
+left join feedback c on a.class_uid = c.object_id 
+-- where lesson_views >= 1000
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
